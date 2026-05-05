@@ -72,8 +72,8 @@
 </head>
 <body>
 <div class="app">
-  <h1>Inverted Pendulum — Open Loop</h1>
-  <p class="subtitle">x₀ = 0 m &nbsp;·&nbsp; ẋ₀ = 0 &nbsp;·&nbsp; θ₀ = 5° &nbsp;·&nbsp; θ̇₀ = 0 &nbsp;·&nbsp; no control force</p>
+  <h1>Inverted Pendulum — Manual Control</h1>
+  <p class="subtitle">x₀ = 0 m &nbsp;·&nbsp; ẋ₀ = 0 &nbsp;·&nbsp; θ₀ = 5° &nbsp;·&nbsp; θ̇₀ = 0 &nbsp;·&nbsp; ← → arrow keys to push cart</p>
 
   <div class="canvas-wrapper">
     <canvas id="simCanvas" width="900" height="260"></canvas>
@@ -82,6 +82,7 @@
   <div class="controls">
     <button id="btnPause">Pause</button>
     <button id="btnReset">Reset</button>
+    <button id="btnLqr" style="background:#059669;color:#fff;padding:8px 22px;border-radius:6px;border:none;cursor:pointer;font-size:.9rem;font-weight:600;">LQR: OFF</button>
   </div>
 
   <div class="telemetry">
@@ -90,6 +91,9 @@
     <div class="tel-item"><div class="tel-label">ẋ (m/s)</div><div class="tel-value" id="tXd">0.000</div></div>
     <div class="tel-item"><div class="tel-label">θ (°)</div><div class="tel-value" id="tTheta">5.00</div></div>
     <div class="tel-item"><div class="tel-label">θ̇ (°/s)</div><div class="tel-value" id="tThetad">0.0</div></div>
+    <div class="tel-item"><div class="tel-label">F manual (N)</div><div class="tel-value" id="tFManual">0</div></div>
+    <div class="tel-item"><div class="tel-label">F lqr (N)</div><div class="tel-value" id="tFLqr">0</div></div>
+    <div class="tel-item"><div class="tel-label">F total (N)</div><div class="tel-value" id="tForce">0</div></div>
   </div>
 
   <div class="charts">
@@ -100,6 +104,10 @@
     <div class="chart-box">
       <div class="chart-title">Pole angle — θ (°)</div>
       <canvas id="angCanvas" width="480" height="130"></canvas>
+    </div>
+    <div class="chart-box" style="grid-column: 1 / -1;">
+      <div class="chart-title">Control input — F (N)</div>
+      <canvas id="forceCanvas" width="960" height="100"></canvas>
     </div>
   </div>
 </div>
@@ -132,19 +140,50 @@ function makeInitialState() { return [0, 0, 5 * Math.PI / 180, 0]; }
 const DT = 0.01;
 const HIST = 500;
 
+const FORCE_MAG = 10;  // Newtons applied per key
+const keysHeld  = new Set();
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    e.preventDefault();   // stop page from scrolling
+    keysHeld.add(e.key);
+  }
+});
+window.addEventListener('keyup', e => keysHeld.delete(e.key));
+
+function manualForce() {
+  let F = 0;
+  if (keysHeld.has('ArrowLeft'))  F -= FORCE_MAG;
+  if (keysHeld.has('ArrowRight')) F += FORCE_MAG;
+  return F;
+}
+
+// LQR gains computed with scipy.linalg.solve_continuous_are
+// Q=diag(1,1,10,10), R=0.1  →  F = -K @ state
+const K_LQR = [-3.1623, -6.2976, -54.8423, -15.5793];
+
+function lqrForce(s) {
+  const F = -(K_LQR[0]*s[0] + K_LQR[1]*s[1] + K_LQR[2]*s[2] + K_LQR[3]*s[3]);
+  return Math.max(-30, Math.min(30, F));
+}
+
+let lqrOn = false;
+
 let state    = makeInitialState();
-let posHist  = [];
-let angHist  = [];
-let simTime  = 0;
+let posHist   = [];
+let angHist   = [];
+let forceHist = [];
+let simTime   = 0;
 let acc      = 0;
 let lastTs   = null;
 let paused   = false;
 let rafId    = null;
 
 // ── Drawing ───────────────────────────────────────────────────────────────────
-const simCanvas = document.getElementById('simCanvas');
-const posCanvas = document.getElementById('posCanvas');
-const angCanvas = document.getElementById('angCanvas');
+const simCanvas   = document.getElementById('simCanvas');
+const posCanvas   = document.getElementById('posCanvas');
+const angCanvas   = document.getElementById('angCanvas');
+const forceCanvas = document.getElementById('forceCanvas');
 
 function drawSim(s) {
   const ctx = simCanvas.getContext('2d');
@@ -258,7 +297,9 @@ function updateTelemetry(s, t) {
   document.getElementById('tTime').textContent   = t.toFixed(2);
   document.getElementById('tX').textContent      = s[0].toFixed(3);
   document.getElementById('tXd').textContent     = s[1].toFixed(3);
-  document.getElementById('tTheta').textContent  = (s[2] * 180 / Math.PI).toFixed(2);
+  let dispDeg = s[2] * 180 / Math.PI;
+  dispDeg = ((dispDeg % 360) + 360) % 360;
+  document.getElementById('tTheta').textContent  = dispDeg.toFixed(2);
   document.getElementById('tThetad').textContent = (s[3] * 180 / Math.PI).toFixed(1);
 }
 
@@ -272,19 +313,39 @@ function tick(ts) {
   lastTs = ts;
   acc += real;
 
+  let Fm = 0, Fl = 0, F = 0;
+
   while (acc >= DT) {
     acc -= DT;
-    state = rk4(state, 0, DT);   // open loop: F = 0
+    // recompute force every step so the controller always sees current state
+    Fm = manualForce();
+    Fl = lqrOn ? lqrForce(state) : 0;
+    F  = Fm + Fl;
+
+    state = rk4(state, F, DT);
     simTime += DT;
 
     posHist.push(state[0]);
-    angHist.push(state[2] * 180 / Math.PI);
-    if (posHist.length > HIST) { posHist.shift(); angHist.shift(); }
+    let deg = state[2] * 180 / Math.PI;
+    deg = ((deg % 360) + 360) % 360;
+    angHist.push(deg);
+    forceHist.push(F);
+    if (posHist.length > HIST) { posHist.shift(); angHist.shift(); forceHist.shift(); }
   }
 
+  document.getElementById('tFManual').textContent = Fm.toFixed(1);
+  document.getElementById('tFLqr').textContent    = Fl.toFixed(1);
+  document.getElementById('tForce').textContent   = F.toFixed(1);
+
   drawSim(state);
-  drawChart(posCanvas, posHist, '#60a5fa', -2.5, 2.5, 'x (m)');
-  drawChart(angCanvas, angHist, '#f97316', -200, 200, 'θ (°)');
+  const posMin = Math.min(...posHist, -0.1);
+  const posMax = Math.max(...posHist,  0.1);
+  drawChart(posCanvas, posHist, '#60a5fa', posMin, posMax, 'x (m)');
+  const angMin = Math.min(...angHist,  -5);
+  const angMax = Math.max(...angHist, 365);
+  drawChart(angCanvas, angHist, '#f97316', angMin, angMax, 'θ (°)');
+  const fAbsMax = Math.max(Math.max(...forceHist.map(Math.abs)), FORCE_MAG);
+  drawChart(forceCanvas, forceHist, '#a78bfa', -fAbsMax, fAbsMax, 'F (N)');
   updateTelemetry(state, simTime);
 }
 
@@ -296,15 +357,23 @@ document.getElementById('btnPause').addEventListener('click', () => {
 });
 
 document.getElementById('btnReset').addEventListener('click', () => {
-  state   = makeInitialState();
-  posHist = [];
-  angHist = [];
+  state      = makeInitialState();
+  posHist    = [];
+  angHist    = [];
+  forceHist  = [];
   simTime = 0;
   acc     = 0;
   lastTs  = null;
   paused  = false;
   document.getElementById('btnPause').textContent = 'Pause';
   updateTelemetry(state, 0);
+});
+
+document.getElementById('btnLqr').addEventListener('click', () => {
+  lqrOn = !lqrOn;
+  const btn = document.getElementById('btnLqr');
+  btn.textContent = lqrOn ? 'LQR: ON' : 'LQR: OFF';
+  btn.style.background = lqrOn ? '#dc2626' : '#059669';
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
