@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Inverted Pendulum — Open Loop</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #0f1117;
+    color: #e0e0e0;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  .app { max-width: 1000px; margin: 0 auto; }
+  h1 { text-align: center; font-size: 1.8rem; color: #60a5fa; margin-bottom: 6px; }
+  .subtitle { text-align: center; color: #9ca3af; font-size: 0.88rem; margin-bottom: 20px; }
+
+  .canvas-wrapper {
+    background: #1a1d27;
+    border: 1px solid #2d3748;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 14px;
+  }
+  #simCanvas { display: block; width: 100%; }
+
+  .controls {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .controls button {
+    padding: 8px 22px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  #btnPause { background: #3b82f6; color: #fff; }
+  #btnReset { background: #ef4444; color: #fff; }
+  .controls button:hover { opacity: 0.85; }
+
+  .telemetry {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+  }
+  .tel-item {
+    background: #1f2937;
+    border-radius: 8px;
+    padding: 10px 16px;
+    text-align: center;
+    min-width: 100px;
+  }
+  .tel-label { font-size: 0.7rem; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+  .tel-value { font-size: 1.15rem; font-weight: 700; font-family: 'Courier New', monospace; color: #60a5fa; }
+
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .chart-box { background: #1a1d27; border: 1px solid #2d3748; border-radius: 10px; overflow: hidden; }
+  .chart-title { padding: 7px 12px; font-size: 0.75rem; color: #9ca3af; border-bottom: 1px solid #2d3748; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+  .chart-box canvas { display: block; width: 100%; }
+
+  @media (max-width: 600px) { .charts { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Inverted Pendulum — Open Loop</h1>
+  <p class="subtitle">x₀ = 0 m &nbsp;·&nbsp; ẋ₀ = 0 &nbsp;·&nbsp; θ₀ = 5° &nbsp;·&nbsp; θ̇₀ = 0 &nbsp;·&nbsp; no control force</p>
+
+  <div class="canvas-wrapper">
+    <canvas id="simCanvas" width="900" height="260"></canvas>
+  </div>
+
+  <div class="controls">
+    <button id="btnPause">Pause</button>
+    <button id="btnReset">Reset</button>
+  </div>
+
+  <div class="telemetry">
+    <div class="tel-item"><div class="tel-label">Time (s)</div><div class="tel-value" id="tTime">0.00</div></div>
+    <div class="tel-item"><div class="tel-label">x (m)</div><div class="tel-value" id="tX">0.000</div></div>
+    <div class="tel-item"><div class="tel-label">ẋ (m/s)</div><div class="tel-value" id="tXd">0.000</div></div>
+    <div class="tel-item"><div class="tel-label">θ (°)</div><div class="tel-value" id="tTheta">5.00</div></div>
+    <div class="tel-item"><div class="tel-label">θ̇ (°/s)</div><div class="tel-value" id="tThetad">0.0</div></div>
+  </div>
+
+  <div class="charts">
+    <div class="chart-box">
+      <div class="chart-title">Cart position — x (m)</div>
+      <canvas id="posCanvas" width="480" height="130"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">Pole angle — θ (°)</div>
+      <canvas id="angCanvas" width="480" height="130"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Physics ──────────────────────────────────────────────────────────────────
+const P = { M: 1.0, m: 0.1, l: 0.5, g: 9.81, b: 0.1 };
+
+function derivatives(s, F) {
+  const [, xd, th, thd] = s;
+  const { M, m, l, g, b } = P;
+  const c = Math.cos(th), sn = Math.sin(th);
+  const denom = M + m - m * c * c;
+  const xdd   = (F - b * xd + m * l * thd * thd * sn - m * g * c * sn) / denom;
+  const thdd  = ((M + m) * g * sn - c * (F - b * xd + m * l * thd * thd * sn)) / (l * denom);
+  return [xd, xdd, thd, thdd];
+}
+
+function rk4(s, F, dt) {
+  const k1 = derivatives(s, F);
+  const k2 = derivatives(s.map((v, i) => v + 0.5 * dt * k1[i]), F);
+  const k3 = derivatives(s.map((v, i) => v + 0.5 * dt * k2[i]), F);
+  const k4 = derivatives(s.map((v, i) => v + dt * k3[i]), F);
+  return s.map((v, i) => v + (dt / 6) * (k1[i] + 2*k2[i] + 2*k3[i] + k4[i]));
+}
+
+function makeInitialState() { return [0, 0, 5 * Math.PI / 180, 0]; }
+
+// ── State ────────────────────────────────────────────────────────────────────
+const DT = 0.01;
+const HIST = 500;
+
+let state    = makeInitialState();
+let posHist  = [];
+let angHist  = [];
+let simTime  = 0;
+let acc      = 0;
+let lastTs   = null;
+let paused   = false;
+let rafId    = null;
+
+// ── Drawing ───────────────────────────────────────────────────────────────────
+const simCanvas = document.getElementById('simCanvas');
+const posCanvas = document.getElementById('posCanvas');
+const angCanvas = document.getElementById('angCanvas');
+
+function drawSim(s) {
+  const ctx = simCanvas.getContext('2d');
+  const W = simCanvas.width, H = simCanvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#1a1d27';
+  ctx.fillRect(0, 0, W, H);
+
+  const TRACK_HALF = 2.4;           // metres
+  const scale  = W / (TRACK_HALF * 2 * 2.4);  // px/m
+  const groundY = H * 0.70;
+  const cx = W / 2 + s[0] * scale;
+
+  // Track line
+  ctx.strokeStyle = '#374151';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, groundY + 18);
+  ctx.lineTo(W, groundY + 18);
+  ctx.stroke();
+
+  // Track limit markers
+  const limPx = TRACK_HALF * scale;
+  ctx.strokeStyle = '#ef4444';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 4]);
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(W/2 + side * limPx, groundY - 50);
+    ctx.lineTo(W/2 + side * limPx, groundY + 22);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // Cart
+  const cW = 60, cH = 28;
+  ctx.fillStyle = '#3b82f6';
+  ctx.beginPath();
+  ctx.roundRect(cx - cW/2, groundY - cH, cW, cH, 5);
+  ctx.fill();
+
+  // Wheels
+  for (const dx of [-18, 18]) {
+    ctx.beginPath();
+    ctx.arc(cx + dx, groundY + 4, 9, 0, Math.PI * 2);
+    ctx.fillStyle = '#1e293b';
+    ctx.fill();
+    ctx.strokeStyle = '#60a5fa';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Pole
+  const poleLen = P.l * 2 * scale;
+  const px = cx + poleLen * Math.sin(s[2]);
+  const py = groundY - cH/2 - poleLen * Math.cos(s[2]);
+
+  ctx.strokeStyle = '#f97316';
+  ctx.lineWidth = 6;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(cx, groundY - cH/2);
+  ctx.lineTo(px, py);
+  ctx.stroke();
+
+  // Bob
+  ctx.fillStyle = '#fbbf24';
+  ctx.beginPath();
+  ctx.arc(px, py, 9, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawChart(canvas, data, color, yMin, yMax, label) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#1a1d27';
+  ctx.fillRect(0, 0, W, H);
+
+  // Zero line
+  const zeroY = H - (0 - yMin) / (yMax - yMin) * H;
+  ctx.strokeStyle = '#374151';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(0, zeroY);
+  ctx.lineTo(W, zeroY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (data.length < 2) return;
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  data.forEach((v, i) => {
+    const x = (i / (HIST - 1)) * W;
+    const y = H - (Math.max(yMin, Math.min(yMax, v)) - yMin) / (yMax - yMin) * H;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Label with current value
+  const last = data[data.length - 1];
+  ctx.fillStyle = color;
+  ctx.font = '12px monospace';
+  ctx.fillText(`${label} = ${last.toFixed(3)}`, 8, 16);
+}
+
+function updateTelemetry(s, t) {
+  document.getElementById('tTime').textContent   = t.toFixed(2);
+  document.getElementById('tX').textContent      = s[0].toFixed(3);
+  document.getElementById('tXd').textContent     = s[1].toFixed(3);
+  document.getElementById('tTheta').textContent  = (s[2] * 180 / Math.PI).toFixed(2);
+  document.getElementById('tThetad').textContent = (s[3] * 180 / Math.PI).toFixed(1);
+}
+
+// ── Loop ──────────────────────────────────────────────────────────────────────
+function tick(ts) {
+  rafId = requestAnimationFrame(tick);
+  if (paused) return;
+
+  if (lastTs === null) { lastTs = ts; return; }
+  const real = Math.min((ts - lastTs) / 1000, 0.05);
+  lastTs = ts;
+  acc += real;
+
+  while (acc >= DT) {
+    acc -= DT;
+    state = rk4(state, 0, DT);   // open loop: F = 0
+    simTime += DT;
+
+    posHist.push(state[0]);
+    angHist.push(state[2] * 180 / Math.PI);
+    if (posHist.length > HIST) { posHist.shift(); angHist.shift(); }
+  }
+
+  drawSim(state);
+  drawChart(posCanvas, posHist, '#60a5fa', -2.5, 2.5, 'x (m)');
+  drawChart(angCanvas, angHist, '#f97316', -200, 200, 'θ (°)');
+  updateTelemetry(state, simTime);
+}
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+document.getElementById('btnPause').addEventListener('click', () => {
+  paused = !paused;
+  document.getElementById('btnPause').textContent = paused ? 'Resume' : 'Pause';
+  if (!paused) lastTs = null;
+});
+
+document.getElementById('btnReset').addEventListener('click', () => {
+  state   = makeInitialState();
+  posHist = [];
+  angHist = [];
+  simTime = 0;
+  acc     = 0;
+  lastTs  = null;
+  paused  = false;
+  document.getElementById('btnPause').textContent = 'Pause';
+  updateTelemetry(state, 0);
+});
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+drawSim(state);
+updateTelemetry(state, 0);
+rafId = requestAnimationFrame(tick);
+</script>
+</body>
+</html>
