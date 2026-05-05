@@ -82,7 +82,7 @@
   <div class="controls">
     <button id="btnPause">Pause</button>
     <button id="btnReset">Reset</button>
-    <button id="btnLqr" style="background:#059669;color:#fff;padding:8px 22px;border-radius:6px;border:none;cursor:pointer;font-size:.9rem;font-weight:600;">LQR: OFF</button>
+    <button id="btnAuto" style="background:#059669;color:#fff;padding:8px 22px;border-radius:6px;border:none;cursor:pointer;font-size:.9rem;font-weight:600;">Auto: OFF</button>
   </div>
 
   <div class="telemetry">
@@ -92,8 +92,9 @@
     <div class="tel-item"><div class="tel-label">θ (°)</div><div class="tel-value" id="tTheta">5.00</div></div>
     <div class="tel-item"><div class="tel-label">θ̇ (°/s)</div><div class="tel-value" id="tThetad">0.0</div></div>
     <div class="tel-item"><div class="tel-label">F manual (N)</div><div class="tel-value" id="tFManual">0</div></div>
-    <div class="tel-item"><div class="tel-label">F lqr (N)</div><div class="tel-value" id="tFLqr">0</div></div>
+    <div class="tel-item"><div class="tel-label">F auto (N)</div><div class="tel-value" id="tFLqr">0</div></div>
     <div class="tel-item"><div class="tel-label">F total (N)</div><div class="tel-value" id="tForce">0</div></div>
+    <div class="tel-item"><div class="tel-label">Mode</div><div class="tel-value" id="tMode" style="font-size:.85rem;">—</div></div>
   </div>
 
   <div class="charts">
@@ -134,7 +135,7 @@ function rk4(s, F, dt) {
   return s.map((v, i) => v + (dt / 6) * (k1[i] + 2*k2[i] + 2*k3[i] + k4[i]));
 }
 
-function makeInitialState() { return [0, 0, 5 * Math.PI / 180, 0]; }
+function makeInitialState() { return [0, 0, 90 * Math.PI / 180, 0]; }
 
 // ── State ────────────────────────────────────────────────────────────────────
 const DT = 0.01;
@@ -158,16 +159,41 @@ function manualForce() {
   return F;
 }
 
-// LQR gains computed with scipy.linalg.solve_continuous_are
-// Q=diag(1,1,10,10), R=0.1  →  F = -K @ state
-const K_LQR = [-3.1623, -6.2976, -54.8423, -15.5793];
+// ── Angle helper ──────────────────────────────────────────────────────────────
+function wrapAngle(th) {
+  return ((th + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+}
+
+// ── LQR  (scipy solve_continuous_are, Q=diag(1,1,10,10), R=0.1) ──────────────
+const K_LQR = [-3.1623, -6.2976, -54.8423, -15.5793];  // F = -K @ state
 
 function lqrForce(s) {
-  const F = -(K_LQR[0]*s[0] + K_LQR[1]*s[1] + K_LQR[2]*s[2] + K_LQR[3]*s[3]);
+  const sw = [s[0], s[1], wrapAngle(s[2]), s[3]];  // feed wrapped angle
+  const F  = -(K_LQR[0]*sw[0] + K_LQR[1]*sw[1] + K_LQR[2]*sw[2] + K_LQR[3]*sw[3]);
   return Math.max(-30, Math.min(30, F));
 }
 
-let lqrOn = false;
+// ── Swing-up  (energy-based, Åström-Furuta) ───────────────────────────────────
+const E_UPRIGHT  = P.m * P.g * P.l;   // target energy at upright
+const K_SWINGUP  = 2.0;
+const SWITCH_DEG = 30.0;               // hand-off to LQR within ±30°
+const SWITCH_VEL = 4.0;               // …and angular velocity < 4 rad/s
+
+function swingupForce(s) {
+  const th = s[2], thd = s[3];
+  const E  = 0.5 * P.m * P.l**2 * thd**2 + P.m * P.g * P.l * Math.cos(th);
+  const dE = E - E_UPRIGHT;
+  return Math.max(-30, Math.min(30, K_SWINGUP * thd * Math.cos(th) * dE));
+}
+
+function autoForce(s) {
+  const thw = wrapAngle(s[2]);
+  if (Math.abs(thw) < SWITCH_DEG * Math.PI / 180 && Math.abs(s[3]) < SWITCH_VEL)
+    return { F: lqrForce(s),     mode: 'LQR' };
+  return   { F: swingupForce(s), mode: 'Swing-up' };
+}
+
+let autoOn = false;
 
 let state    = makeInitialState();
 let posHist   = [];
@@ -313,14 +339,18 @@ function tick(ts) {
   lastTs = ts;
   acc += real;
 
-  let Fm = 0, Fl = 0, F = 0;
+  let Fm = 0, Fl = 0, F = 0, currentMode = '—';
 
   while (acc >= DT) {
     acc -= DT;
-    // recompute force every step so the controller always sees current state
     Fm = manualForce();
-    Fl = lqrOn ? lqrForce(state) : 0;
-    F  = Fm + Fl;
+    if (autoOn) {
+      const res = autoForce(state);
+      Fl = res.F;  currentMode = res.mode;
+    } else {
+      Fl = 0;  currentMode = '—';
+    }
+    F = Fm + Fl;
 
     state = rk4(state, F, DT);
     simTime += DT;
@@ -336,6 +366,7 @@ function tick(ts) {
   document.getElementById('tFManual').textContent = Fm.toFixed(1);
   document.getElementById('tFLqr').textContent    = Fl.toFixed(1);
   document.getElementById('tForce').textContent   = F.toFixed(1);
+  document.getElementById('tMode').textContent    = currentMode;
 
   drawSim(state);
   const posMin = Math.min(...posHist, -0.1);
@@ -369,11 +400,11 @@ document.getElementById('btnReset').addEventListener('click', () => {
   updateTelemetry(state, 0);
 });
 
-document.getElementById('btnLqr').addEventListener('click', () => {
-  lqrOn = !lqrOn;
-  const btn = document.getElementById('btnLqr');
-  btn.textContent = lqrOn ? 'LQR: ON' : 'LQR: OFF';
-  btn.style.background = lqrOn ? '#dc2626' : '#059669';
+document.getElementById('btnAuto').addEventListener('click', () => {
+  autoOn = !autoOn;
+  const btn = document.getElementById('btnAuto');
+  btn.textContent = autoOn ? 'Auto: ON' : 'Auto: OFF';
+  btn.style.background = autoOn ? '#dc2626' : '#059669';
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
