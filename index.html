@@ -68,21 +68,67 @@
   .chart-box canvas { display: block; width: 100%; }
 
   @media (max-width: 600px) { .charts { grid-template-columns: 1fr; } }
+
+  .tilt-bar {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    padding: 0 8px;
+  }
+  .tilt-bar.active { display: flex; }
+  .tilt-track {
+    flex: 1;
+    height: 10px;
+    background: #1f2937;
+    border-radius: 5px;
+    position: relative;
+    border: 1px solid #374151;
+  }
+  .tilt-thumb {
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    background: #7c3aed;
+    border-radius: 50%;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  .tilt-center {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: 1px;
+    height: 100%;
+    background: #4b5563;
+  }
+  .tilt-label { font-size: 0.75rem; color: #9ca3af; white-space: nowrap; }
 </style>
 </head>
 <body>
 <div class="app">
   <h1>Inverted Pendulum — Manual Control</h1>
-  <p class="subtitle">x₀ = 0 m &nbsp;·&nbsp; ẋ₀ = 0 &nbsp;·&nbsp; θ₀ = 5° &nbsp;·&nbsp; θ̇₀ = 0 &nbsp;·&nbsp; ← → arrow keys to push cart</p>
+  <p class="subtitle">x₀ = 0 m &nbsp;·&nbsp; ẋ₀ = 0 &nbsp;·&nbsp; θ₀ = 5° &nbsp;·&nbsp; θ̇₀ = 0 &nbsp;·&nbsp; ← → keys or tilt phone to push cart</p>
 
   <div class="canvas-wrapper">
     <canvas id="simCanvas" width="900" height="260"></canvas>
+  </div>
+
+  <div class="tilt-bar" id="tiltBar">
+    <span class="tilt-label">← Tilt →</span>
+    <div class="tilt-track">
+      <div class="tilt-center"></div>
+      <div class="tilt-thumb" id="tiltThumb"></div>
+    </div>
+    <span class="tilt-label" id="tiltAngle">0.0°</span>
   </div>
 
   <div class="controls">
     <button id="btnPause">Pause</button>
     <button id="btnReset">Reset</button>
     <button id="btnAuto" style="background:#059669;color:#fff;padding:8px 22px;border-radius:6px;border:none;cursor:pointer;font-size:.9rem;font-weight:600;">Auto: OFF</button>
+    <button id="btnTilt" style="background:#7c3aed;color:#fff;padding:8px 22px;border-radius:6px;border:none;cursor:pointer;font-size:.9rem;font-weight:600;">Tilt: OFF</button>
   </div>
 
   <div class="telemetry">
@@ -156,7 +202,41 @@ function manualForce() {
   let F = 0;
   if (keysHeld.has('ArrowLeft'))  F -= FORCE_MAG;
   if (keysHeld.has('ArrowRight')) F += FORCE_MAG;
+  F += tiltForce();
   return F;
+}
+
+// ── Tilt / Device Orientation ─────────────────────────────────────────────────
+let tiltOn = false;
+let tiltGamma = 0;
+const TILT_DEADZONE = 3;   // degrees of dead zone at center
+const TILT_MAX      = 45;  // degrees where force reaches FORCE_MAG
+
+function tiltForce() {
+  if (!tiltOn) return 0;
+  const sign = tiltGamma < 0 ? -1 : 1;
+  const abs  = Math.abs(tiltGamma);
+  if (abs < TILT_DEADZONE) return 0;
+  return sign * Math.min((abs - TILT_DEADZONE) / (TILT_MAX - TILT_DEADZONE), 1) * FORCE_MAG;
+}
+
+function onOrient(e) { tiltGamma = e.gamma ?? 0; }
+
+async function enableTilt() {
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const perm = await DeviceOrientationEvent.requestPermission();
+      if (perm !== 'granted') { alert('Orientation permission denied.'); return false; }
+    } catch(e) { return false; }
+  }
+  window.addEventListener('deviceorientation', onOrient);
+  return true;
+}
+
+function disableTilt() {
+  window.removeEventListener('deviceorientation', onOrient);
+  tiltGamma = 0;
 }
 
 // ── Angle helper ──────────────────────────────────────────────────────────────
@@ -378,6 +458,11 @@ function tick(ts) {
   const fAbsMax = Math.max(Math.max(...forceHist.map(Math.abs)), FORCE_MAG);
   drawChart(forceCanvas, forceHist, '#a78bfa', -fAbsMax, fAbsMax, 'F (N)');
   updateTelemetry(state, simTime);
+  if (tiltOn) {
+    const pct = 0.5 + Math.max(-45, Math.min(45, tiltGamma)) / 90;
+    document.getElementById('tiltThumb').style.left = (pct * 100) + '%';
+    document.getElementById('tiltAngle').textContent = tiltGamma.toFixed(1) + '°';
+  }
 }
 
 // ── Controls ──────────────────────────────────────────────────────────────────
@@ -405,6 +490,21 @@ document.getElementById('btnAuto').addEventListener('click', () => {
   const btn = document.getElementById('btnAuto');
   btn.textContent = autoOn ? 'Auto: ON' : 'Auto: OFF';
   btn.style.background = autoOn ? '#dc2626' : '#059669';
+});
+
+document.getElementById('btnTilt').addEventListener('click', async () => {
+  if (!tiltOn) {
+    const ok = await enableTilt();
+    if (!ok) return;
+    tiltOn = true;
+  } else {
+    disableTilt();
+    tiltOn = false;
+  }
+  const btn = document.getElementById('btnTilt');
+  btn.textContent = tiltOn ? 'Tilt: ON' : 'Tilt: OFF';
+  btn.style.background = tiltOn ? '#dc2626' : '#7c3aed';
+  document.getElementById('tiltBar').classList.toggle('active', tiltOn);
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
