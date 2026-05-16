@@ -2,7 +2,7 @@
 
 An interactive web-based simulation of an inverted pendulum on a cart, featuring both manual control and automatic stabilization using swing-up and LQR control strategies.
 
-**[Live Demo](https://rabini88.github.io/pendulum/)** | **Keyboard Control:** Arrow keys ← → or tilt your phone
+**[Live Demo]([https://rabini88.github.io/pendulum/](https://rabini88.github.io/Course-036714-week2/))** | **Keyboard Control:** Arrow keys ← → or tilt your phone
 
 ---
 
